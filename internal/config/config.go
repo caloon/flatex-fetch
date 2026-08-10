@@ -13,6 +13,16 @@ import (
 	"path/filepath"
 )
 
+// Profile is one saved account: the local nickname it's addressed by, the
+// portal login it maps to, and that login's password. Name is the key —
+// it's what the CLI's -profile flag matches and what [LoadSecrets] dedupes
+// on, so it must be unique across profiles.
+//
+// The Password field means a Profile is secret in full, never just its
+// password: it is only ever persisted inside credentials.enc, encrypted as
+// part of the whole []Profile payload. The json tags exist for that blob
+// (and for the retired plaintext profiles.json this format replaced) — do
+// not write a Profile anywhere unencrypted.
 type Profile struct {
 	Name     string `json:"name"`
 	Username string `json:"username"`

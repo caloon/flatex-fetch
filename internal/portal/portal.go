@@ -42,6 +42,21 @@ const (
 	variantNext
 )
 
+// Client is one authenticated portal session: a cookie jar plus the
+// server-issued token that every request echoes back. Build it with [New],
+// then call [Client.Login] before anything else — listing and download both
+// depend on session state that only Login establishes.
+//
+// Login also decides which of the two portal frontends this account uses
+// (the classical UI or flatex-next) from where its redirect chain lands, and
+// repoints the request paths accordingly. Callers never choose the variant;
+// the same [Client.ListDocumentsDetailed] and [Client.Download] calls work
+// against either.
+//
+// Not safe for concurrent use: every response rewrites the session token, so
+// two in-flight requests on one Client will invalidate each other. Use one
+// Client per goroutine. Requests are deliberately paced (see requestDelay),
+// so a Client is slow by design, not by accident.
 type Client struct {
 	hc                  *http.Client
 	baseURL             string // https://konto.<domain>; tests point this at httptest

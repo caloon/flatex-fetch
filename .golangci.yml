@@ -10,14 +10,25 @@ linters:
     - govet
     - ineffassign
     - misspell
+    - revive
     - staticcheck
     - unconvert
     - unused
     - whitespace
+  settings:
+    revive:
+      rules:
+        # Doc comments on exported identifiers: catches both a missing one
+        # and one that doesn't start with the identifier's name. staticcheck
+        # cannot do this — its ST10xx checks only validate the form of a
+        # comment that already exists, so a bare exported type passes clean.
+        - name: exported
   exclusions:
     generated: lax
     presets:
-      - comments
+      # NOTE: the "comments" preset is deliberately absent. It suppresses
+      # revive's exported rule entirely, which would silently make the
+      # setting above a no-op.
       - common-false-positives
       - legacy
       - std-error-handling
