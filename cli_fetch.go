@@ -132,6 +132,28 @@ func resolveProfiles(profileName string, allProfiles bool) ([]config.Profile, er
 	return profiles, nil
 }
 
+// portalClient is the subset of *portal.Client that fetchProfile drives.
+// ponytail: an interface with one production implementation, which normally
+// wouldn't earn its keep — it exists solely because fetchProfile is
+// otherwise untestable without a live portal account. The fake in
+// cli_fetch_profile_test.go is the second implementation.
+type portalClient interface {
+	Login(username, password string) error
+	ListDocumentsDetailed(from, to time.Time) ([]portal.Document, error)
+	Download(from, to time.Time, idx int, resolvePath portal.ResolvePath, seen map[string]bool, overwrite bool) (string, bool, error)
+}
+
+// newPortalClient builds the real portal session. Tests swap it to inject a
+// fake; nothing else reassigns it.
+var newPortalClient = func(domain, userAgent string, log func(string, ...any)) (portalClient, error) {
+	c, err := portal.New(domain, userAgent)
+	if err != nil {
+		return nil, err
+	}
+	c.Log = log
+	return c, nil
+}
+
 func runFetch(args []string) int {
 	fs := flag.NewFlagSet("fetch", flag.ContinueOnError)
 	profileName := fs.String("profile", "", "profile to fetch (default: first configured profile)")
@@ -249,14 +271,15 @@ func fetchProfile(p config.Profile, password, out, format, userAgent string, fro
 	if password == "" {
 		return errors.New("no stored password (re-add the profile)")
 	}
-	c, err := portal.New(p.Domain, userAgent)
-	if err != nil {
-		return err
-	}
+	var log func(string, ...any)
 	if verbose {
-		c.Log = func(format string, args ...any) {
+		log = func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "profile %s: "+format+"\n", append([]any{p.Name}, args...)...)
 		}
+	}
+	c, err := newPortalClient(p.Domain, userAgent, log)
+	if err != nil {
+		return err
 	}
 	if err := c.Login(p.Username, password); err != nil {
 		return err
@@ -289,6 +312,22 @@ func fetchProfile(p config.Profile, password, out, format, userAgent string, fro
 	}
 	seen := map[string]bool{}
 	downloaded, skipped, failedDocs := 0, 0, 0
+	// logging goes false as soon as any document fails. Documents are sorted
+	// oldest-first, so every document after a failure is newer, and logging
+	// one would push -since-last's frontier (lastDocumentDate) past the
+	// failure — making the next run start after it and skip the failed
+	// document forever. Downloads continue; only the log is held back.
+	// Boundary: "newer" here only means newer within this run's own sorted
+	// slice. lastDocumentDate takes the max Date over the whole log, so a
+	// wide explicit -from/-to backfill that fails on an old document can
+	// still sit behind a frontier a previous run already pushed further
+	// ahead — this guard can't pull that frontier back.
+	//
+	// ponytail: an unconditional bool rather than tracking the failed date.
+	// The cost is that documents after a failure stay unlogged until a clean
+	// run, so the next run re-fetches their bytes before skipping them on
+	// disk. That self-heals; a silent permanent gap does not.
+	logging := true
 	for _, d := range docs {
 		if !overwrite {
 			if _, ok := alreadyLogged(logEntries, p.Name, d); ok {
@@ -308,9 +347,11 @@ func fetchProfile(p config.Profile, password, out, format, userAgent string, fro
 		case errors.Is(err, portal.ErrChallenged):
 			fmt.Fprintf(os.Stderr, "profile %s: %s: blocked by bot-check challenge\n", p.Name, describeDocument(d))
 			failedDocs++
+			logging = false
 		case err != nil:
 			fmt.Fprintf(os.Stderr, "profile %s: %s: %v\n", p.Name, describeDocument(d), err)
 			failedDocs++
+			logging = false
 		case wasSkipped:
 			if verbose {
 				fmt.Fprintf(os.Stderr, "profile %s: skip (on disk): %s\n", p.Name, describeDocument(d))
@@ -323,7 +364,7 @@ func fetchProfile(p config.Profile, password, out, format, userAgent string, fro
 			// documents share a date/name (logKey is ambiguous, so
 			// alreadyLogged can't match) and would otherwise grow a
 			// duplicate line on every single run.
-			if !logHasPath(logEntries, path) {
+			if logging && !logHasPath(logEntries, path) {
 				if err := logDownload(out, p.Name, path, d); err != nil {
 					fmt.Fprintf(os.Stderr, "profile %s: %s: log write failed: %v\n", p.Name, describeDocument(d), err)
 				}
@@ -331,8 +372,10 @@ func fetchProfile(p config.Profile, password, out, format, userAgent string, fro
 			skipped++
 		default:
 			fmt.Println(path)
-			if err := logDownload(out, p.Name, path, d); err != nil {
-				fmt.Fprintf(os.Stderr, "profile %s: %s: log write failed: %v\n", p.Name, describeDocument(d), err)
+			if logging {
+				if err := logDownload(out, p.Name, path, d); err != nil {
+					fmt.Fprintf(os.Stderr, "profile %s: %s: log write failed: %v\n", p.Name, describeDocument(d), err)
+				}
 			}
 			downloaded++
 		}

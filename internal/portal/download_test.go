@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -158,7 +159,7 @@ func TestDownloadZipWithMultipleEntriesErrors(t *testing.T) {
 	}
 }
 
-func TestDownloadDedupAndCollision(t *testing.T) {
+func TestDownloadDedupAndOverwrite(t *testing.T) {
 	srv := downloadServer(t,
 		map[string][]byte{
 			"/banking-flatex.at/downloadData/1/doc-0.bin": []byte("%PDF-1.4 row0"),
@@ -219,6 +220,106 @@ func TestDownloadDetectsChallenge(t *testing.T) {
 	}
 }
 
+// dispositionServer serves the archive download flow with a caller-chosen
+// Content-Disposition on the file response, so tests can drive
+// resolveFilename with a hostile server-supplied filename.
+func dispositionServer(t *testing.T, disposition string, body []byte) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /banking-flatex.at/"+headerAreaAction, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"commands":[{"command":"replacePortions"}]}`)
+	})
+	mux.HandleFunc("POST /banking-flatex.at/"+archiveListAction, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"commands":[{"command":"download","location":"/banking-flatex.at/downloadData/1/doc.bin"}]}`)
+	})
+	mux.HandleFunc("GET /banking-flatex.at/downloadData/1/doc.bin", func(w http.ResponseWriter, r *http.Request) {
+		if disposition != "" {
+			w.Header().Set("Content-Disposition", disposition)
+		}
+		w.Write(body)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestDownloadHostileFilenameStaysInDestDir drives resolveFilename with
+// server-supplied filenames that try to escape the destination directory.
+// The portal is the untrusted side of this boundary: whatever it sends, the
+// file must land directly inside the directory ResolvePath chose.
+func TestDownloadHostileFilenameStaysInDestDir(t *testing.T) {
+	for _, tc := range []struct{ name, disposition string }{
+		{"parent traversal", `attachment; filename="../../evil.pdf"`},
+		{"absolute path", `attachment; filename="/etc/cron.d/evil.pdf"`},
+		{"windows separators", `attachment; filename="..\\..\\evil.pdf"`},
+		{"double dot", `attachment; filename=".."`},
+		{"single dot", `attachment; filename="."`},
+		{"empty", `attachment; filename=""`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := dispositionServer(t, tc.disposition, []byte("%PDF-1.4 payload"))
+			c := newTestClient(t, srv)
+			dir := t.TempDir()
+
+			p, skipped, err := c.Download(testWindow.from, testWindow.to, 0, flatResolvePath(dir), map[string]bool{}, false)
+			if err != nil || skipped {
+				t.Fatalf("Download: err=%v skipped=%v", err, skipped)
+			}
+			if filepath.Dir(p) != dir {
+				t.Fatalf("wrote %q, want a file directly inside %q", p, dir)
+			}
+			// sanitize() must strip separators from the server-supplied name.
+			// filepath.Dir(p) != dir alone cannot catch a missing backslash
+			// guard on Linux, where `\` is an ordinary character: the file
+			// would still land inside dir, just named "..\..\evil.pdf".
+			if b := filepath.Base(p); strings.ContainsAny(b, `\/`) {
+				t.Fatalf("resolved name %q still contains a path separator", b)
+			}
+			if _, err := os.Stat(p); err != nil {
+				t.Fatalf("stat %q: %v", p, err)
+			}
+		})
+	}
+}
+
+// TestDownloadZipEntryTraversalRejected covers writeZipEntry's guard: a zip
+// whose single entry name climbs out of the destination directory must be
+// refused outright, not sanitized into some nearby path and written anyway.
+func TestDownloadZipEntryTraversalRejected(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("../../evil.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("%PDF-1.4 evil")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := dispositionServer(t, "", buf.Bytes())
+	c := newTestClient(t, srv)
+	dir := t.TempDir()
+
+	_, _, err = c.Download(testWindow.from, testWindow.to, 0, flatResolvePath(dir), map[string]bool{}, false)
+	if err == nil {
+		t.Fatal("expected an error for a zip entry that escapes the destination directory")
+	}
+	if !strings.Contains(err.Error(), "unsafe zip entry name") {
+		t.Fatalf("err = %v, want it to name the unsafe zip entry", err)
+	}
+
+	found, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("destination dir is not empty after a rejected zip: %v", found)
+	}
+}
+
 func TestDownloadNoDownloadInResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/banking-flatex.at/"+headerAreaAction, func(w http.ResponseWriter, r *http.Request) {
@@ -235,5 +336,61 @@ func TestDownloadNoDownloadInResponse(t *testing.T) {
 	_, _, err := c.Download(testWindow.from, testWindow.to, 0, flatResolvePath(dir), map[string]bool{}, false)
 	if err == nil {
 		t.Fatal("expected error when response has no download command")
+	}
+}
+
+// fixedResolvePath sends every document to the same destination name — the
+// within-run collision a -format template can produce (e.g. two documents
+// sharing a month and profile).
+func fixedResolvePath(dir, name string) ResolvePath {
+	return func(string) (string, string) { return dir, name }
+}
+
+// TestDownloadWithinRunCollisionSuffixes covers writeFile's seen-map branch
+// and suffixed(): documents colliding on one destination within a single run
+// get _2/_3 suffixes rather than overwriting each other.
+func TestDownloadWithinRunCollisionSuffixes(t *testing.T) {
+	srv := downloadServer(t,
+		map[string][]byte{
+			"/banking-flatex.at/downloadData/1/doc-0.bin": []byte("%PDF-1.4 row0"),
+			"/banking-flatex.at/downloadData/1/doc-1.bin": []byte("%PDF-1.4 row1"),
+			"/banking-flatex.at/downloadData/1/doc-2.bin": []byte("%PDF-1.4 row2"),
+		},
+		nil,
+	)
+	c := newTestClient(t, srv)
+	dir := t.TempDir()
+	seen := map[string]bool{}
+
+	var paths []string
+	for idx := 0; idx < 3; idx++ {
+		p, skipped, err := c.Download(testWindow.from, testWindow.to, idx, fixedResolvePath(dir, "same.pdf"), seen, false)
+		if err != nil || skipped {
+			t.Fatalf("row %d: err=%v skipped=%v", idx, err, skipped)
+		}
+		paths = append(paths, p)
+	}
+
+	want := []string{
+		filepath.Join(dir, "same.pdf"),
+		filepath.Join(dir, "same_2.pdf"),
+		filepath.Join(dir, "same_3.pdf"),
+	}
+	for i, w := range want {
+		if paths[i] != w {
+			t.Fatalf("row %d wrote %q, want %q", i, paths[i], w)
+		}
+	}
+
+	// Every document's own bytes must survive — a collision must not let one
+	// document's content overwrite another's.
+	for i, p := range paths {
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w := fmt.Sprintf("%%PDF-1.4 row%d", i); string(got) != w {
+			t.Fatalf("%s contains %q, want %q", p, got, w)
+		}
 	}
 }
