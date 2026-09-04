@@ -48,6 +48,19 @@ func TestSecretsMissingFile(t *testing.T) {
 	}
 }
 
+func TestCredentialsExist(t *testing.T) {
+	dir := t.TempDir()
+	if CredentialsExist(dir) {
+		t.Fatal("CredentialsExist = true before credentials.enc is written")
+	}
+	if err := SaveSecrets(dir, []byte("x"), []Profile{{Name: "a"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !CredentialsExist(dir) {
+		t.Fatal("CredentialsExist = false after credentials.enc was written")
+	}
+}
+
 // TestSaveSecretsAtomicNoLeftoverTmp covers finding 2: SaveSecrets writes via
 // a temp file + rename, so a successful save must leave no ".tmp" behind,
 // and a normal SaveSecrets -> LoadSecrets round trip must still work.

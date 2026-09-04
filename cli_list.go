@@ -99,14 +99,15 @@ func listProfile(p config.Profile, password, userAgent string, from, to time.Tim
 	if password == "" {
 		return errors.New("no stored password (re-add the profile)")
 	}
-	c, err := portal.New(p.Domain, userAgent)
-	if err != nil {
-		return err
-	}
+	var log func(string, ...any)
 	if verbose {
-		c.Log = func(format string, args ...any) {
+		log = func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "profile %s: "+format+"\n", append([]any{p.Name}, args...)...)
 		}
+	}
+	c, err := newPortalClient(p.Domain, userAgent, log)
+	if err != nil {
+		return err
 	}
 	if err := c.Login(p.Username, password); err != nil {
 		return err
