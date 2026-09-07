@@ -29,3 +29,5 @@ flatex-fetch-test
 # the published repo.
 .superpowers/
 docs/superpowers/
+
+downloads/
