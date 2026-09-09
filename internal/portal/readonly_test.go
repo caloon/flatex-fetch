@@ -192,3 +192,96 @@ func TestDocumentPolicyRejectsSameOriginRedirectActions(t *testing.T) {
 		}
 	}
 }
+
+// The German classic SSO handoff preserves the login POST and carries a
+// separate opaque loginData query. Test through Login and net/http redirects.
+func TestGermanClassicLoginPostHandoff(t *testing.T) {
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var handoffs int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "GET /login/loginIFrameFormAction.do":
+					fmt.Fprint(w, `webcore.setTokenId("login-token");`)
+				case "POST /login/sso":
+					http.Redirect(w, r, "/banking-flatex/loginCommand?loginData=synthetic-token", status)
+				case "POST /banking-flatex/loginCommand":
+					handoffs++
+					if err := r.ParseForm(); err != nil {
+						t.Error(err)
+						return
+					}
+					if r.URL.Query().Get("loginData") != "synthetic-token" || len(r.PostForm) != 5 || r.PostForm.Get("userId") != "test-user" || r.PostForm.Get("password") != "test-password" {
+						t.Error("handoff lost query or original login fields")
+					}
+					http.SetCookie(w, &http.Cookie{Name: "flatexSession", Value: "test-session", Path: "/"})
+					http.Redirect(w, r, "/banking-flatex/accountOverviewFormAction.do", http.StatusFound)
+				case "GET /banking-flatex/accountOverviewFormAction.do":
+					fmt.Fprint(w, `webcore.setTokenId("banking-token");`)
+				case "POST /banking-flatex/ajaxCommandServlet":
+					fmt.Fprint(w, `{"commands":[]}`)
+				default:
+					t.Errorf("unexpected route %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c := newTestClient(t, srv, "flatex.de")
+			if err := c.Login("test-user", "test-password"); err != nil {
+				t.Fatal(err)
+			}
+			if handoffs != 1 {
+				t.Fatalf("handoffs = %d, want 1", handoffs)
+			}
+		})
+	}
+}
+
+func TestGermanClassicLoginHandoffRejectsOtherOperations(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		fmt.Fprint(w, "unexpected")
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv, "flatex.de")
+	for _, tc := range []struct{ method, path, query string }{
+		{"GET", "/banking-flatex/loginCommand", "loginData=synthetic"},
+		{"PUT", "/banking-flatex/loginCommand", "loginData=synthetic"},
+		{"POST", "/banking-flatex/loginCommand", ""},
+		{"POST", "/banking-flatex/loginCommand", "loginData="},
+		{"POST", "/banking-flatex/loginCommand", "loginData=one&loginData=two"},
+		{"POST", "/banking-flatex/loginCommand", "loginData=synthetic&command=trade"},
+		{"POST", "/banking-flatex/loginCommand", "loginData=synthetic%00"},
+		{"POST", "/banking-flatex/loginCommand", "loginData=%zz"},
+		{"POST", "/banking-flatex/orderFormAction.do", "loginData=synthetic"},
+		{"POST", "/banking-flatex/transferFormAction.do", "loginData=synthetic"},
+		{"POST", "/banking-flatex/settingsFormAction.do", "loginData=synthetic"},
+		{"POST", "/login/sso", "loginData=synthetic"},
+		{"POST", "/banking-flatex.at/loginCommand", "loginData=synthetic"},
+		{"POST", "/next-desktop.de/loginCommand", "loginData=synthetic"},
+	} {
+		req, err := http.NewRequest(tc.method, srv.URL+tc.path+"?"+tc.query, strings.NewReader(testLoginFields(t).Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if response, err := c.hc.Do(req); err == nil {
+			_ = response.Body.Close()
+			t.Errorf("accepted %s %s?%s", tc.method, tc.path, tc.query)
+		}
+	}
+	for _, field := range []string{"order.clicked", "transfer.clicked", "settings.clicked", "sessionPassword", "tan", "command", "_method", "loginData", "userId"} {
+		f := testLoginFields(t)
+		f.Add(field, "unsafe")
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/banking-flatex/loginCommand?loginData=synthetic", strings.NewReader(f.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if response, err := c.hc.Do(req); err == nil {
+			_ = response.Body.Close()
+			t.Errorf("accepted extra body field %s", field)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("%d prohibited requests reached server", calls.Load())
+	}
+}

@@ -76,14 +76,23 @@ func (t *documentTransport) check(req *http.Request) error {
 		}
 		return errDocumentOnly
 	}
-	if req.Method != http.MethodPost || len(query) != 0 {
+	if req.Method != http.MethodPost {
 		return errDocumentOnly
 	}
 	form, err := requestFields(req)
 	if err != nil || !singleValues(form) {
 		return errDocumentOnly
 	}
-	if t.allowedPost(u.Path, form) {
+	// German classic login preserves the SSO POST through a redirect. The
+	// query token and the original login body must each match their own
+	// exact schema; never merge them into one command parameter set.
+	if t.banking == "/banking-flatex/" && u.Path == t.banking+loginCommandAction {
+		if fieldsMatch(query, map[string]string{"loginData": "@token"}) && t.allowedPost(t.login+ssoAction, form) {
+			return nil
+		}
+		return errDocumentOnly
+	}
+	if len(query) == 0 && t.allowedPost(u.Path, form) {
 		return nil
 	}
 	return errDocumentOnly
