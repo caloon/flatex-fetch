@@ -61,7 +61,7 @@ func downloadServer(t *testing.T, content map[string][]byte, contentType map[str
 		}
 		w.Write(body)
 	})
-	mux.HandleFunc("/challenge", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/banking-flatex.at/downloadData/1/challenge.pdf", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		fmt.Fprint(w, `<html>myracloud verification</html>`)
@@ -200,9 +200,9 @@ func TestDownloadDetectsChallenge(t *testing.T) {
 		fmt.Fprint(w, `{"commands":[{"command":"replacePortions"}]}`)
 	})
 	mux.HandleFunc("/banking-flatex.at/"+archiveListAction, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"commands":[{"command":"download","location":"/challenge"}]}`)
+		fmt.Fprint(w, `{"commands":[{"command":"download","location":"/banking-flatex.at/downloadData/1/challenge.pdf"}]}`)
 	})
-	mux.HandleFunc("/challenge", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/banking-flatex.at/downloadData/1/challenge.pdf", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		fmt.Fprint(w, `<html>myracloud verification</html>`)

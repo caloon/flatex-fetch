@@ -69,10 +69,11 @@ func TestRedirectsNeverSendSecretsOffOrigin(t *testing.T) {
 			defer srv.Close()
 			c := newTestClient(t, srv)
 			c.tokenID = "secret-token"
-			req, err := http.NewRequest(http.MethodPost, srv.URL+"/login", strings.NewReader("password=secret"))
+			req, err := http.NewRequest(http.MethodPost, srv.URL+c.ssoPath, strings.NewReader(testLoginFields(t).Encode()))
 			if err != nil {
 				t.Fatal(err)
 			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			if _, _, err := c.do(req, true); err == nil {
 				t.Fatal("followed unapproved redirect")
 			}
@@ -93,8 +94,8 @@ func TestRedirectRejectsHTTPSDowngrade(t *testing.T) {
 	defer srv.Close()
 	destination = strings.Replace(srv.URL, "https:", "http:", 1) + "/leak"
 	c := newTestClient(t, srv)
-	c.hc.Transport = srv.Client().Transport
-	if _, err := c.plainGet("/start"); err == nil || !strings.Contains(err.Error(), "blocked request") {
+	c.hc.Transport.(*documentTransport).next = srv.Client().Transport
+	if _, err := c.plainGet(c.loginPagePath); err == nil || !strings.Contains(err.Error(), "blocked request") {
 		t.Fatalf("expected origin rejection, got %v", err)
 	}
 	if received.Load() != 1 {
@@ -103,28 +104,31 @@ func TestRedirectRejectsHTTPSDowngrade(t *testing.T) {
 }
 
 func TestValidSameOriginRedirectAndLimit(t *testing.T) {
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/start":
-			http.Redirect(w, r, "/finish", http.StatusTemporaryRedirect)
-		case "/finish":
+		if r.URL.Path == "/login.at/sso" {
+			if calls.Add(1) == 1 {
+				http.Redirect(w, r, "/login.at/sso", http.StatusTemporaryRedirect)
+				return
+			}
 			b, _ := io.ReadAll(r.Body)
-			if r.Method != http.MethodPost || string(b) != "password=secret" || r.Header.Get("X-tokenId") != "token" {
+			if r.Method != http.MethodPost || string(b) == "" || r.Header.Get("X-tokenId") != "token" {
 				t.Error("same-origin redirect lost request data")
 			}
 			fmt.Fprint(w, "ok")
-		case "/loop":
-			http.Redirect(w, r, "/loop", http.StatusFound)
+			return
 		}
+		http.Redirect(w, r, "/login.at/loginIFrameFormAction.do", http.StatusFound)
 	}))
 	defer srv.Close()
 	c := newTestClient(t, srv)
 	c.tokenID = "token"
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/start", strings.NewReader("password=secret"))
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+c.ssoPath, strings.NewReader(testLoginFields(t).Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if body, _, err := c.do(req, true); err != nil || body != "ok" {
 		t.Fatalf("valid redirect failed: %q, %v", body, err)
 	}
-	if _, err := c.plainGet("/loop"); err == nil || !strings.Contains(err.Error(), "10 redirects") {
+	if _, err := c.plainGet(c.loginPagePath); err == nil || !strings.Contains(err.Error(), "10 redirects") {
 		t.Fatalf("redirect limit: %v", err)
 	}
 }

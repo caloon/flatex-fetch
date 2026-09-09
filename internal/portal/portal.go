@@ -117,6 +117,7 @@ func New(domain, userAgent string) (*Client, error) {
 	}
 	c.allowedOrigin, _ = url.Parse(c.baseURL)
 	c.hc.CheckRedirect = c.checkRedirect
+	c.hc.Transport = &documentTransport{client: c, next: http.DefaultTransport, login: "/" + loginSegment + "/", banking: "/" + bankingSegment + "/", desktop: "/" + c.nextDesktopSegment + "/"}
 	return c, nil
 }
 
