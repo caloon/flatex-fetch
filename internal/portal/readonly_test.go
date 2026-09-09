@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -193,20 +195,26 @@ func TestDocumentPolicyRejectsSameOriginRedirectActions(t *testing.T) {
 	}
 }
 
-// Exercise both GET and preserved-POST login redirects through net/http.
-// The outer URL error reports the initial POST even if the blocked hop is GET.
+// German classic's live redirect chain (2026-09-09) reaches loginCommand,
+// then the query-free loginProgressFormAction.do. The previous fixture went
+// straight to accountOverview and missed the guard's rejection of progress.
+// Exercise both GET and preserved-POST handoffs through net/http, then use
+// the resulting session to list and download a document. Paths are literal
+// so a mistaken production path constant cannot make this fixture pass.
 func TestGermanClassicLoginHandoff(t *testing.T) {
 	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			var handoffs int
+			var seen []string
+			const document = "%PDF-1.4 synthetic German statement"
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.Method + " " + r.URL.Path {
+				route := r.Method + " " + r.URL.Path
+				seen = append(seen, route)
+				switch route {
 				case "GET /login/loginIFrameFormAction.do":
 					fmt.Fprint(w, `webcore.setTokenId("login-token");`)
 				case "POST /login/sso":
 					http.Redirect(w, r, "/banking-flatex/loginCommand?loginData=synthetic-token", status)
 				case "GET /banking-flatex/loginCommand", "POST /banking-flatex/loginCommand":
-					handoffs++
 					if err := r.ParseForm(); err != nil {
 						t.Error(err)
 						return
@@ -222,11 +230,34 @@ func TestGermanClassicLoginHandoff(t *testing.T) {
 						t.Error("GET handoff retained a login body")
 					}
 					http.SetCookie(w, &http.Cookie{Name: "flatexSession", Value: "test-session", Path: "/"})
-					http.Redirect(w, r, "/banking-flatex/accountOverviewFormAction.do", http.StatusFound)
+					http.Redirect(w, r, "/banking-flatex/loginProgressFormAction.do", http.StatusFound)
+				case "GET /banking-flatex/loginProgressFormAction.do":
+					if r.URL.RawQuery != "" || r.ContentLength != 0 || r.Header.Get("X-Requested-With") != "" {
+						t.Error("login progress must be a plain, query-free GET")
+					}
+					fmt.Fprint(w, `<html>login progress</html>`)
 				case "GET /banking-flatex/accountOverviewFormAction.do":
 					fmt.Fprint(w, `webcore.setTokenId("banking-token");`)
 				case "POST /banking-flatex/ajaxCommandServlet":
+					if r.FormValue("command") != "engineStartUp" || r.Header.Get("X-Tokenid") != "banking-token" {
+						t.Error("session startup did not use the banking token")
+					}
 					fmt.Fprint(w, `{"commands":[]}`)
+				case "POST /banking-flatex/headerAreaFormAction.do":
+					fmt.Fprint(w, `{"commands":[]}`)
+				case "POST /banking-flatex/documentArchiveListFormAction.do":
+					switch {
+					case r.FormValue("applyFilterButton.clicked") == "true":
+						fmt.Fprint(w, `{"commands":[{"command":"replacePortions","deltasToApply":["documentArchiveListTable","<tr class=\"Read\" id=\"TID1_0-0\"><td class=\"C2\">01.01.2025</td><td class=\"C4\"><div class=\"Ellipsis\">Test statement</div></td></tr>"]}]}`)
+					case r.FormValue("btnDocumentDownload.clicked") == "true" && r.FormValue("documentArchiveListTable.rowSelectionSupport[0].checked") == "on":
+						fmt.Fprint(w, `{"commands":[{"command":"download","location":"/banking-flatex/downloadData/1/statement.pdf"}]}`)
+					default:
+						t.Error("unexpected archive operation")
+						http.Error(w, "unexpected archive operation", http.StatusBadRequest)
+					}
+				case "GET /banking-flatex/downloadData/1/statement.pdf":
+					w.Header().Set("Content-Type", "application/pdf")
+					fmt.Fprint(w, document)
 				default:
 					t.Errorf("unexpected route %s %s", r.Method, r.URL.Path)
 					http.NotFound(w, r)
@@ -237,8 +268,41 @@ func TestGermanClassicLoginHandoff(t *testing.T) {
 			if err := c.Login("test-user", "test-password"); err != nil {
 				t.Fatal(err)
 			}
-			if handoffs != 1 {
-				t.Fatalf("handoffs = %d, want 1", handoffs)
+			if c.variant != variantOld {
+				t.Fatal("German classic progress changed the portal variant")
+			}
+			date := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+			docs, err := c.ListDocumentsDetailed(date, date)
+			if err != nil || len(docs) != 1 || docs[0].Name != "Test statement" {
+				t.Fatalf("ListDocumentsDetailed: documents=%+v err=%v", docs, err)
+			}
+			path, skipped, err := c.Download(docs[0].WindowFrom, docs[0].WindowTo, docs[0].Index, flatResolvePath(t.TempDir()), map[string]bool{}, false)
+			if err != nil || skipped {
+				t.Fatalf("Download: skipped=%v err=%v", skipped, err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != document {
+				t.Fatalf("downloaded content=%q err=%v", got, err)
+			}
+			handoffMethod := "GET"
+			if status == http.StatusTemporaryRedirect || status == http.StatusPermanentRedirect {
+				handoffMethod = "POST"
+			}
+			want := []string{
+				"GET /login/loginIFrameFormAction.do",
+				"POST /login/sso",
+				handoffMethod + " /banking-flatex/loginCommand",
+				"GET /banking-flatex/loginProgressFormAction.do",
+				"GET /banking-flatex/accountOverviewFormAction.do",
+				"POST /banking-flatex/ajaxCommandServlet",
+				"POST /banking-flatex/headerAreaFormAction.do",
+				"POST /banking-flatex/documentArchiveListFormAction.do",
+				"POST /banking-flatex/headerAreaFormAction.do",
+				"POST /banking-flatex/documentArchiveListFormAction.do",
+				"GET /banking-flatex/downloadData/1/statement.pdf",
+			}
+			if !reflect.DeepEqual(seen, want) {
+				t.Fatalf("requests=%v, want %v", seen, want)
 			}
 		})
 	}
@@ -301,5 +365,80 @@ func TestGermanClassicLoginHandoffRejectsOtherOperations(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("%d prohibited requests reached server", calls.Load())
+	}
+}
+
+func TestGermanClassicLoginProgressRejectsOtherOperations(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		fmt.Fprint(w, "unexpected")
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv, "flatex.de")
+	const progress = "/banking-flatex/loginProgressFormAction.do"
+	for _, tc := range []struct{ method, path, body string }{
+		{"GET", progress + "?command=trade", ""},
+		{"GET", progress + "?loginData=synthetic", ""},
+		{"GET", progress + "?command=one&command=two", ""},
+		{"GET", progress + "?%zz", ""},
+		{"GET", progress, "command=trade"},
+		{"POST", progress, testLoginFields(t).Encode()},
+		{"POST", progress, "command=resumeLogin"},
+		{"PUT", progress, ""},
+		{"DELETE", progress, ""},
+		{"HEAD", progress, ""},
+		{"GET", "/banking-flatex.at/loginProgressFormAction.do", ""},
+		{"GET", "/banking-flatex/loginProgressFormAction.do/orderFormAction.do", ""},
+	} {
+		req, err := http.NewRequest(tc.method, srv.URL+tc.path, strings.NewReader(tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if response, err := c.hc.Do(req); err == nil {
+			_ = response.Body.Close()
+			t.Errorf("accepted %s %s", tc.method, tc.path)
+		}
+	}
+	// The German route must not become available to an Austrian client.
+	at := newTestClient(t, srv)
+	if _, err := at.plainGet(progress); err == nil {
+		t.Error("Austrian client accepted German login progress")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("%d prohibited requests reached server", calls.Load())
+	}
+}
+
+func TestGermanClassicLoginProgressRejectsUnsafeRedirects(t *testing.T) {
+	for _, status := range []int{301, 302, 303, 307, 308} {
+		for _, target := range []string{
+			"/banking-flatex/orderFormAction.do",
+			"/banking-flatex/transferFormAction.do",
+			"/banking-flatex/settingsFormAction.do",
+			"/banking-flatex/loginProgressFormAction.do?command=trade",
+			"/banking-flatex/ajaxCommandServlet?command=resumeLogin",
+		} {
+			t.Run(fmt.Sprintf("%d%s", status, target), func(t *testing.T) {
+				var calls atomic.Int32
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if calls.Add(1) == 1 {
+						http.Redirect(w, r, target, status)
+						return
+					}
+					t.Error("unsafe redirect reached server")
+					http.Error(w, "unexpected", http.StatusBadRequest)
+				}))
+				defer srv.Close()
+				c := newTestClient(t, srv, "flatex.de")
+				if _, err := c.plainGet("/banking-flatex/loginProgressFormAction.do"); err == nil {
+					t.Error("accepted unsafe redirect from login progress")
+				}
+				if calls.Load() != 1 {
+					t.Fatalf("requests=%d, want only login progress", calls.Load())
+				}
+			})
+		}
 	}
 }

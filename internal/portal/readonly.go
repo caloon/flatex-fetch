@@ -83,7 +83,7 @@ func (t *documentTransport) check(req *http.Request) error {
 	if err != nil || !singleValues(form) {
 		return errDocumentOnly
 	}
-	// German classic login preserves the SSO POST through a redirect. The
+	// If a German classic login redirect preserves the SSO POST, the
 	// query token and the original login body must each match their own
 	// exact schema; never merge them into one command parameter set.
 	if t.banking == "/banking-flatex/" && u.Path == t.banking+loginCommandAction {
@@ -104,6 +104,11 @@ func (t *documentTransport) allowedGet(p string, q url.Values) bool {
 	}
 	if p == t.desktop+loginCommandAction || (t.banking == "/banking-flatex/" && p == t.banking+loginCommandAction) {
 		return fieldsMatch(q, map[string]string{"loginData": "@token"})
+	}
+	// German classic also lands on this page after loginCommand (observed
+	// 2026-09-09). It is only a bodyless GET, never a login/action form POST.
+	if t.banking == "/banking-flatex/" && p == t.banking+loginProgressAction {
+		return len(q) == 0
 	}
 	if p == t.banking+accountOverviewAction || p == t.banking+archiveListAction || p == t.desktop+nextArchiveAction || p == t.desktop+loginProgressAction {
 		return len(q) == 0
