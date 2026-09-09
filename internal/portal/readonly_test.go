@@ -299,6 +299,7 @@ func TestGermanClassicLoginHandoff(t *testing.T) {
 				"POST /banking-flatex/documentArchiveListFormAction.do",
 				"POST /banking-flatex/headerAreaFormAction.do",
 				"POST /banking-flatex/documentArchiveListFormAction.do",
+				"POST /banking-flatex/documentArchiveListFormAction.do",
 				"GET /banking-flatex/downloadData/1/statement.pdf",
 			}
 			if !reflect.DeepEqual(seen, want) {

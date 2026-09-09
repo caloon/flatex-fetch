@@ -152,7 +152,10 @@ func (c *Client) resolveDownloadLocation(from, to time.Time, idx int) (string, e
 	if c.variant == variantNext {
 		return c.nextDownload(from, to, idx)
 	}
-	if err := c.ensureArchivePage(); err != nil {
+	// Row selections refer to the table built by Apply Filter. Sending
+	// dates with the Download click does not establish that table first;
+	// windowed listing may have left a different range active.
+	if _, err := c.filterArchive(from, to); err != nil {
 		return "", err
 	}
 	form := archiveFilterForm(from, to)
