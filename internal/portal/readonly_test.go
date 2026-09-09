@@ -193,10 +193,10 @@ func TestDocumentPolicyRejectsSameOriginRedirectActions(t *testing.T) {
 	}
 }
 
-// The German classic SSO handoff preserves the login POST and carries a
-// separate opaque loginData query. Test through Login and net/http redirects.
-func TestGermanClassicLoginPostHandoff(t *testing.T) {
-	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+// Exercise both GET and preserved-POST login redirects through net/http.
+// The outer URL error reports the initial POST even if the blocked hop is GET.
+func TestGermanClassicLoginHandoff(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			var handoffs int
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -205,14 +205,21 @@ func TestGermanClassicLoginPostHandoff(t *testing.T) {
 					fmt.Fprint(w, `webcore.setTokenId("login-token");`)
 				case "POST /login/sso":
 					http.Redirect(w, r, "/banking-flatex/loginCommand?loginData=synthetic-token", status)
-				case "POST /banking-flatex/loginCommand":
+				case "GET /banking-flatex/loginCommand", "POST /banking-flatex/loginCommand":
 					handoffs++
 					if err := r.ParseForm(); err != nil {
 						t.Error(err)
 						return
 					}
-					if r.URL.Query().Get("loginData") != "synthetic-token" || len(r.PostForm) != 5 || r.PostForm.Get("userId") != "test-user" || r.PostForm.Get("password") != "test-password" {
-						t.Error("handoff lost query or original login fields")
+					if r.URL.Query().Get("loginData") != "synthetic-token" {
+						t.Error("handoff lost login query")
+					}
+					if status == http.StatusTemporaryRedirect || status == http.StatusPermanentRedirect {
+						if r.Method != "POST" || len(r.PostForm) != 5 || r.PostForm.Get("userId") != "test-user" || r.PostForm.Get("password") != "test-password" {
+							t.Error("handoff lost original login fields")
+						}
+					} else if r.Method != "GET" || len(r.PostForm) != 0 || r.ContentLength != 0 {
+						t.Error("GET handoff retained a login body")
 					}
 					http.SetCookie(w, &http.Cookie{Name: "flatexSession", Value: "test-session", Path: "/"})
 					http.Redirect(w, r, "/banking-flatex/accountOverviewFormAction.do", http.StatusFound)
@@ -269,6 +276,17 @@ func TestGermanClassicLoginHandoffRejectsOtherOperations(t *testing.T) {
 		if response, err := c.hc.Do(req); err == nil {
 			_ = response.Body.Close()
 			t.Errorf("accepted %s %s?%s", tc.method, tc.path, tc.query)
+		}
+	}
+	// Bodyless GET handoffs still reject malformed or extra query fields.
+	for _, query := range []string{"", "loginData=", "loginData=one&loginData=two", "loginData=synthetic&command=trade", "loginData=synthetic%00", "loginData=%zz"} {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/banking-flatex/loginCommand?"+query, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response, err := c.hc.Do(req); err == nil {
+			_ = response.Body.Close()
+			t.Errorf("accepted unsafe GET query %q", query)
 		}
 	}
 	for _, field := range []string{"order.clicked", "transfer.clicked", "settings.clicked", "sessionPassword", "tan", "command", "_method", "loginData", "userId"} {

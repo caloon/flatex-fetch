@@ -30,7 +30,7 @@ func (t *documentTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, err
 	}
 	if err := t.check(req); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s %q: %w", req.Method, req.URL.Path, err)
 	}
 	return t.next.RoundTrip(req)
 }
@@ -102,7 +102,7 @@ func (t *documentTransport) allowedGet(p string, q url.Values) bool {
 	if p == t.login+loginPageAction {
 		return len(q) == 0
 	}
-	if p == t.desktop+loginCommandAction {
+	if p == t.desktop+loginCommandAction || (t.banking == "/banking-flatex/" && p == t.banking+loginCommandAction) {
 		return fieldsMatch(q, map[string]string{"loginData": "@token"})
 	}
 	if p == t.banking+accountOverviewAction || p == t.banking+archiveListAction || p == t.desktop+nextArchiveAction || p == t.desktop+loginProgressAction {
