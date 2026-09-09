@@ -251,3 +251,17 @@ func portalSegmentsFor(domain string) (login, banking string) {
 	}
 	return "login.at", "banking-" + domain
 }
+
+// Exact path and field shapes accepted by the document-only transport policy.
+const (
+	loginCommandAction    = "loginCommand"
+	fetchCachedPageAction = "fetchCachedPage"
+)
+
+var (
+	safeDownloadPath = regexp.MustCompile(`^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$`)
+	windowValue      = regexp.MustCompile(`^W[0-9]+$`)
+	integerValue     = regexp.MustCompile(`^[0-9]+$`)
+	rowField         = regexp.MustCompile(`^documentArchiveListTable\.rowSelectionSupport\[[0-9]+\]\.checked$`)
+	nextDocField     = regexp.MustCompile(`^fullScreenSecondLevelWidgetList\[0\]\.secondLevelContentWidget\.children\[[0-9]+\]\.btnOpenDocument\.clicked$`)
+)
