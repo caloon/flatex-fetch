@@ -164,13 +164,14 @@ const (
 	// headerAreaFormAction.do actions.
 	nextArchiveAction = "overviewFormAction.do"
 
-	// loginCommand and loginProgressAction are new steps flatex-next inserts
-	// between the credentials POST and the old UI's direct
-	// accountOverviewFormAction.do landing: /login.at/sso 302s to
+	// loginCommand and loginProgressAction were first observed in flatex-next:
+	// /login.at/sso 302s to
 	// loginCommand?loginData=<opaque token>, which itself 302s to
 	// loginProgressAction. Both hops are followed automatically by Go's
 	// default http.Client redirect handling — no code needed for them
-	// beyond detecting the final landing path.
+	// beyond detecting the final landing path. German classic also uses
+	// these two routes under /banking-flatex/ (observed 2026-09-09), so the
+	// progress action alone does not identify the flatex-next variant.
 	loginProgressAction = "loginProgressFormAction.do"
 
 	// cmdResumeLogin finalizes the session server-side. Confirmed required
