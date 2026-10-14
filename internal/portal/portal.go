@@ -59,7 +59,8 @@ const (
 // so a Client is slow by design, not by accident.
 type Client struct {
 	hc                  *http.Client
-	baseURL             string // https://konto.<domain>; tests point this at httptest
+	baseURL             string   // https://konto.<domain>; tests point this at httptest
+	allowedOrigin       *url.URL // fixed by New; only package tests override this
 	ua                  string
 	loginPagePath       string
 	ssoPath             string
@@ -89,6 +90,9 @@ func (c *Client) logf(format string, args ...any) {
 // selected by portalSegmentsFor. Only Austria has been verified end to end.
 // An empty userAgent selects the built-in browser default.
 func New(domain, userAgent string) (*Client, error) {
+	if domain != "flatex.at" && domain != "flatex.de" {
+		return nil, errors.New("unsupported portal domain: use flatex.at or flatex.de")
+	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, err
@@ -97,7 +101,7 @@ func New(domain, userAgent string) (*Client, error) {
 		userAgent = DefaultUserAgent
 	}
 	loginSegment, bankingSegment := portalSegmentsFor(domain)
-	return &Client{
+	c := &Client{
 		hc:                  &http.Client{Jar: jar, Timeout: 60 * time.Second},
 		baseURL:             "https://" + portalHostPrefix + domain,
 		ua:                  userAgent,
@@ -110,7 +114,10 @@ func New(domain, userAgent string) (*Client, error) {
 		ajaxCommandPath:     "/" + bankingSegment + "/" + ajaxCommandAction,
 		nextDesktopSegment:  nextDesktopSegmentFor(domain),
 		windowID:            newWindowID(),
-	}, nil
+	}
+	c.allowedOrigin, _ = url.Parse(c.baseURL)
+	c.hc.CheckRedirect = c.checkRedirect
+	return c, nil
 }
 
 // nextDesktopSegmentFor derives flatex-next's banking-app path segment from
@@ -146,6 +153,9 @@ func (c *Client) pace() {
 // (after Go's default http.Client has followed any redirects) — Login uses
 // this to tell the old UI and flatex-next apart.
 func (c *Client) do(req *http.Request, ajax bool) (string, *url.URL, error) {
+	if err := c.checkDestination(req.URL); err != nil {
+		return "", nil, err
+	}
 	c.pace()
 	req.Header.Set("User-Agent", c.ua)
 	if ajax {
@@ -264,9 +274,9 @@ func (c *Client) postFormOnce(path string, form url.Values) (string, error) {
 // XHR call (confirmed from live capture: the fetchCachedPage resync GET
 // carries none of those headers).
 func (c *Client) plainGet(path string) (string, error) {
-	u := path
-	if strings.HasPrefix(u, "/") {
-		u = c.baseURL + u
+	u, err := c.resolveLocation(path)
+	if err != nil {
+		return "", err
 	}
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
