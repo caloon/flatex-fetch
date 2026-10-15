@@ -269,12 +269,7 @@ func documentPathResolver(out, format, profile string, d portal.Document) portal
 // otherwise nothing prints until the final summary line.
 func fetchProfile(p config.Profile, password, out, format, userAgent string, from, to time.Time, sinceLast, overwrite, verbose bool) error {
 	if err := validateProfileName(p.Name); err != nil {
-		return err
-	}
-	if format != "" {
-		if err := validatePathTemplate(format); err != nil {
-			return err
-		}
+		return fmt.Errorf("%w (remove and re-add the profile under a valid name)", err)
 	}
 	if password == "" {
 		return errors.New("no stored password (re-add the profile)")

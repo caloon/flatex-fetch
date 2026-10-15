@@ -94,7 +94,7 @@ UPGRADE FLAGS
 FORMAT TEMPLATE
   Profile names must be single directory names without leading/trailing spaces;
   . and .. are not allowed. Output templates reject absolute paths and ..
-  directory components before login.
+  directory components, and templates not ending in a file name, before login.
 
   -format takes a path template with <token> placeholders, substituted per
   document and split on "/" into directories:

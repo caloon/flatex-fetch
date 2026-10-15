@@ -27,9 +27,9 @@ func TestOutputPathTraversalRejectedBeforeLogin(t *testing.T) {
 			}
 		})
 	}
-	for _, format := range []string{"../<filename>.pdf", "a/../<filename>.pdf", "/tmp/<filename>.pdf", `C:\<filename>.pdf`, `..\<filename>.pdf`, "<date ../YYYY>/<filename>.pdf", "<date /YYYY>/<filename>.pdf"} {
+	for _, format := range []string{"../<filename>.pdf", "a/../<filename>.pdf", "/tmp/<filename>.pdf", `C:\<filename>.pdf`, `..\<filename>.pdf`, "<date ../YYYY>/<filename>.pdf", "<date /YYYY>/<filename>.pdf", ".", "./", "<profile>/", "a/."} {
 		t.Run("format="+format, func(t *testing.T) {
-			if err := fetchProfile(config.Profile{Name: "main"}, "password", t.TempDir(), format, "", time.Time{}, time.Time{}, false, false, false); err == nil {
+			if err := validatePathTemplate(format); err == nil {
 				t.Fatal("unsafe template was accepted")
 			}
 		})
@@ -57,5 +57,13 @@ func TestOutputPathsStayUnderRoot(t *testing.T) {
 	dir, name := documentPathResolver(root, "", "Example Company GmbH", portal.Document{})("invoice.pdf")
 	if dir != filepath.Join(root, "Example Company GmbH") || name != "invoice.pdf" {
 		t.Fatalf("normal path changed: %s/%s", dir, name)
+	}
+}
+
+func TestPortalNameDotsCannotEscapeViaFormat(t *testing.T) {
+	root := t.TempDir()
+	dir, name := documentPathResolver(root, "<filename>/x.pdf", "main", portal.Document{Date: time.Now()})("...pdf")
+	if want := filepath.Join(root, "unknown"); dir != want || name != "x.pdf" {
+		t.Fatalf("got %s/%s, want %s/x.pdf", dir, name, want)
 	}
 }

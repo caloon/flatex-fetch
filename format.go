@@ -31,6 +31,9 @@ func validatePathTemplate(tmpl string) error {
 	if !localOutputPath(rendered) {
 		return fmt.Errorf("-format must be a relative path without parent-directory components")
 	}
+	if last := rendered[strings.LastIndex(rendered, "/")+1:]; last == "" || last == "." {
+		return fmt.Errorf("-format must end in a file name, not a directory")
+	}
 	return nil
 }
 
