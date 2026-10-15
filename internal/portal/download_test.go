@@ -494,14 +494,14 @@ func TestCollisionResumeAndOverwrite(t *testing.T) {
 	}
 }
 
-func TestDifferentExistingBytesAreNotAcceptedAsDownloaded(t *testing.T) {
+func TestDifferentExistingDocumentIsPreserved(t *testing.T) {
 	dir := t.TempDir()
 	resolve := fixedResolvePath(dir, "doc.pdf")
-	original := []byte("%PDF partial")
+	original := []byte("%PDF old")
 	if err := os.WriteFile(filepath.Join(dir, "doc.pdf"), original, 0600); err != nil {
 		t.Fatal(err)
 	}
-	complete := []byte("%PDF complete %%EOF")
+	complete := []byte("%PDF new %%EOF")
 	path, skipped, err := writeFile("ignored.pdf", complete, resolve, map[string]bool{}, false)
 	if err != nil || skipped {
 		t.Fatalf("skipped=%v err=%v", skipped, err)
@@ -511,7 +511,7 @@ func TestDifferentExistingBytesAreNotAcceptedAsDownloaded(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, complete) {
-		t.Fatal("complete replacement not saved")
+		t.Fatal("new document not saved")
 	}
 	got, err = os.ReadFile(filepath.Join(dir, "doc.pdf"))
 	if err != nil {
@@ -519,5 +519,18 @@ func TestDifferentExistingBytesAreNotAcceptedAsDownloaded(t *testing.T) {
 	}
 	if !bytes.Equal(got, original) {
 		t.Fatal("different preexisting file overwritten")
+	}
+}
+
+// A destination that exists but can't be read as a file (here a directory)
+// must fail the document, never be treated as absent or skipped.
+func TestWriteFileUnreadableDestinationIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "doc.pdf"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, skipped, err := writeFile("ignored.pdf", []byte("%PDF"), fixedResolvePath(dir, "doc.pdf"), map[string]bool{}, false)
+	if err == nil || skipped {
+		t.Fatalf("skipped=%v err=%v, want error", skipped, err)
 	}
 }
